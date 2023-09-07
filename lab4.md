@@ -18,6 +18,16 @@ Locking and transactions can be quite tricky to debug!
 
 ##  1. Getting started
 
+------
+
+**Update (11/09/2022):** If you are starting this lab on or after November 9,
+the code that you will get from this repository will include the starter code
+and the tests for later labs. To get only the subset of the code and tests used
+for lab 4, switch to the `lab4` branch (`git checkout lab4`).
+
+------
+
+
 You should begin with the code you submitted for Lab 3 (if you did not submit
 code for Lab 3, or your solution didn't work properly, contact us to discuss
 options).  Additionally, we are providing extra test cases for this lab that are
@@ -271,8 +281,9 @@ Whether the transaction commits or aborts, you should also release any state the
 the transaction held.
 
 At this point, your code should pass the `TransactionTest` unit test and the
-`AbortEvictionTest` system test.  You may find the `TransactionTest` system test
-illustrative, but it will likely fail until you complete the next exercise.
+`AbortEvictionTest` system test.  You may find the `TransactionTest{One, Two
+Five, Ten, AllDirty}` system tests illustrative, but they will likely fail until
+you complete the next exercise.
 
 ###  2.8. Deadlocks and Aborts
 
@@ -316,7 +327,7 @@ alternatives.
 You should ensure that your code aborts transactions properly when a deadlock
 occurs, by throwing a `TransactionAbortedException` exception.  This exception
 will be caught by the code executing the transaction (e.g.,
-`TransactionTest.java`), which should call `transactionComplete()` to cleanup
+`TransactionTestUtil.java`), which should call `transactionComplete()` to cleanup
 after the transaction.  You are not expected to automatically restart a
 transaction which fails due to a deadlock -- you can assume that higher level
 code will take care of this.
@@ -335,8 +346,9 @@ if you use a timeout-based detection method. The tests will output
 `TransactionAbortedExceptions` corresponding to resolved deadlocks to the
 console.
 
-Your code should now should pass the `TransactionTest` system test (which may
-also run for quite a long time depending on your implementation).
+Your code should now should pass the `TransactionTest{One, Two, Five, Ten,
+AllDirty}` system tests (which may also run for quite a long time depending on
+your implementation).
 
 At this point, you should have a recoverable database, in the sense that if the
 database system crashes (at a point other than `transactionComplete()`) or if
@@ -401,7 +413,7 @@ that each member must have their own writeup. Please add your Kerberos username
 to the file name and in the writeup itself (e.g., `lab4-writeup-username1.txt`
 and `lab4-writeup-username2.txt`).
 
-The easiest way to submit to gradescope is with `.zip` files containing your
+The easiest way to submit to Gradescope is with `.zip` files containing your
 code. On Linux/macOS, you can do so by running the following command:
 
 ```bash
