@@ -3,16 +3,34 @@ package simpledb.storage;
 import simpledb.common.Catalog;
 import simpledb.common.Database;
 import simpledb.common.DbException;
-import simpledb.common.Debug;
 import simpledb.transaction.TransactionId;
 
 import java.io.*;
+import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.List;
 import java.util.NoSuchElementException;
 
 /**
  * Each instance of HeapPage stores data for one page of HeapFiles and
  * implements the Page interface that is used by BufferPool.
+ * <p>
+ * Page 结构：
+ * ┌───────────────────────────────────────────────────────────────────┐
+ * │  Header (bitmap)      │  Tuple Slots                              │
+ * │  ceil(numSlots/8)     │  numSlots * tupleSize bytes               │
+ * │  bytes                │                                           │
+ * ├───────────────────────┼───────────────────────────────────────────┤
+ * │  bit0 bit1 ... bit7   │  Slot0  │  Slot1  │  ...  │  SlotN       │
+ * │  [    byte 0     ]    │         │         │       │              │
+ * └───────────────────────┴───────────────────────────────────────────┘
+ * <p>
+ * Header Bitmap 布局（每个 byte）：
+ * ┌─────────────────────────────────────┐
+ * │ bit0 │ bit1 │ bit2 │ ... │ bit7    │
+ * │ LSB                          MSB   │
+ * └─────────────────────────────────────┘
+ * bit=1 表示对应 slot 被占用，bit=0 表示空闲
  *
  * @see HeapFile
  * @see BufferPool
@@ -27,6 +45,11 @@ public class HeapPage implements Page {
 
     byte[] oldData;
     private final Byte oldDataLock = (byte) 0;
+
+    /**
+     * 脏页标记：记录最后修改该页的事务ID，null表示干净
+     */
+    private TransactionId dirtyTid;
 
     /**
      * Create a HeapPage from a set of bytes of data read from disk.
@@ -48,11 +71,13 @@ public class HeapPage implements Page {
     public HeapPage(HeapPageId id, byte[] data) throws IOException {
         this.pid = id;
         this.td = Database.getCatalog().getTupleDesc(id.getTableId());
-        this.numSlots = getNumTuples();
+        // 注意：必须先计算 numSlots，再计算 headerSize
+        this.numSlots = calculateNumTuples();
+
         DataInputStream dis = new DataInputStream(new ByteArrayInputStream(data));
 
         // allocate and read the header slots of this page
-        header = new byte[getHeaderSize()];
+        header = new byte[calculateHeaderSize()];
         for (int i = 0; i < header.length; i++)
             header[i] = dis.readByte();
 
@@ -70,13 +95,35 @@ public class HeapPage implements Page {
     }
 
     /**
+     * 计算每页可以存储的 tuple 数量
+     * 公式：floor((pageSize * 8) / (tupleSize * 8 + 1))
+     * <p>
+     * 解释：每个 tuple 需要 tupleSize * 8 bits 存储数据，
+     * 加上 1 bit 在 header 中标记是否有效
+     */
+    private int calculateNumTuples() {
+        int pageSize = BufferPool.getPageSize();
+        int tupleSize = td.getSize();
+        // pageSize * 8 = 总 bit 数
+        // tupleSize * 8 + 1 = 每个 tuple 需要的 bit 数（数据 + header中的1bit）
+        return (int) Math.floor((pageSize * 8.0) / (tupleSize * 8 + 1));
+    }
+
+    /**
+     * 计算 header 的字节数
+     * 公式：ceil(numSlots / 8)
+     */
+    private int calculateHeaderSize() {
+        return (int) Math.ceil(numSlots / 8.0);
+    }
+
+    /**
      * Retrieve the number of tuples on this page.
      *
      * @return the number of tuples on this page
      */
     private int getNumTuples() {
-        // TODO: some code goes here
-        return 0;
+        return numSlots;
 
     }
 
@@ -86,10 +133,7 @@ public class HeapPage implements Page {
      * @return the number of bytes in the header of a page in a HeapFile with each tuple occupying tupleSize bytes
      */
     private int getHeaderSize() {
-
-        // TODO: some code goes here
-        return 0;
-
+        return numSlots / 8;
     }
 
     /**
@@ -121,8 +165,7 @@ public class HeapPage implements Page {
      * @return the PageId associated with this page.
      */
     public HeapPageId getId() {
-        // TODO: some code goes here
-        throw new UnsupportedOperationException("implement this");
+        return pid;
     }
 
     /**
@@ -254,8 +297,33 @@ public class HeapPage implements Page {
      *                     already empty.
      */
     public void deleteTuple(Tuple t) throws DbException {
-        // TODO: some code goes here
-        // not necessary for lab1
+        RecordId rid = t.getRecordId();
+
+        // 检查 tuple 是否属于这个页面
+        if (rid == null) {
+            throw new DbException("Tuple has no RecordId");
+        }
+        if (!rid.getPageId().equals(pid)) {
+            throw new DbException("Tuple is not on this page");
+        }
+
+        int slotId = rid.getTupleNumber();
+
+        // 检查 slot 范围
+        if (slotId < 0 || slotId >= numSlots) {
+            throw new DbException("Invalid slot number: " + slotId);
+        }
+
+        // 检查 slot 是否已经是空的
+        if (!isSlotUsed(slotId)) {
+            throw new DbException("Slot " + slotId + " is already empty");
+        }
+
+        // 标记 slot 为空
+        markSlotUsed(slotId, false);
+
+        // 清空 tuple
+        tuples[slotId] = null;
     }
 
     /**
@@ -267,8 +335,32 @@ public class HeapPage implements Page {
      *                     is mismatch.
      */
     public void insertTuple(Tuple t) throws DbException {
-        // TODO: some code goes here
-        // not necessary for lab1
+        // 检查 TupleDesc 是否匹配
+        if (!t.getTupleDesc().equals(td)) {
+            throw new DbException("TupleDesc mismatch");
+        }
+
+        // 寻找空闲 slot
+        int emptySlot = -1;
+        for (int i = 0; i < numSlots; i++) {
+            if (!isSlotUsed(i)) {
+                emptySlot = i;
+                break;
+            }
+        }
+
+        if (emptySlot == -1) {
+            throw new DbException("Page is full, no empty slots");
+        }
+
+        // 插入 tuple
+        tuples[emptySlot] = t;
+
+        // 设置 RecordId
+        t.setRecordId(new RecordId(pid, emptySlot));
+
+        // 标记 slot 为已使用
+        markSlotUsed(emptySlot, true);
     }
 
     /**
@@ -276,50 +368,82 @@ public class HeapPage implements Page {
      * that did the dirtying
      */
     public void markDirty(boolean dirty, TransactionId tid) {
-        // TODO: some code goes here
-        // not necessary for lab1
+        if (dirty) {
+            this.dirtyTid = tid;
+        } else {
+            this.dirtyTid = null;
+        }
     }
 
     /**
      * Returns the tid of the transaction that last dirtied this page, or null if the page is not dirty
      */
     public TransactionId isDirty() {
-        // TODO: some code goes here
-        // Not necessary for lab1
-        return null;      
+        return dirtyTid;
     }
 
     /**
      * Returns the number of unused (i.e., empty) slots on this page.
      */
     public int getNumUnusedSlots() {
-        // TODO: some code goes here
-        return 0;
+        int count = 0;
+        for (int i = 0; i < numSlots; i++) {
+            if (!isSlotUsed(i)) {
+                count++;
+            }
+        }
+        return count;
     }
 
     /**
      * Returns true if associated slot on this page is filled.
      */
     public boolean isSlotUsed(int i) {
-        // TODO: some code goes here
-        return false;
+        if (i < 0 || i >= numSlots) {
+            return false;
+        }
+
+        int byteIndex = i / 8;
+        int bitIndex = i % 8;
+
+        // 使用位运算检查对应位是否为1
+        // (header[byteIndex] >> bitIndex) & 1
+        return ((header[byteIndex] >> bitIndex) & 1) == 1;
     }
 
     /**
      * Abstraction to fill or clear a slot on this page.
      */
     private void markSlotUsed(int i, boolean value) {
-        // TODO: some code goes here
-        // not necessary for lab1
+        if (i < 0 || i >= numSlots) {
+            return;
+        }
+
+        int byteIndex = i / 8;
+        int bitIndex = i % 8;
+
+        if (value) {
+            // 设置位为1：使用 OR 操作
+            header[byteIndex] |= (1 << bitIndex);
+        } else {
+            // 设置位为0：使用 AND NOT 操作
+            header[byteIndex] &= ~(1 << bitIndex);
+        }
     }
 
     /**
      * @return an iterator over all tuples on this page (calling remove on this iterator throws an UnsupportedOperationException)
-     *         (note that this iterator shouldn't return tuples in empty slots!)
+     * (note that this iterator shouldn't return tuples in empty slots!)
      */
     public Iterator<Tuple> iterator() {
-        // TODO: some code goes here
-        return null;
+        // 收集所有有效的 tuple
+        List<Tuple> validTuples = new ArrayList<>();
+        for (int i = 0; i < numSlots; i++) {
+            if (isSlotUsed(i) && tuples[i] != null) {
+                validTuples.add(tuples[i]);
+            }
+        }
+        return validTuples.iterator();
     }
 
 }

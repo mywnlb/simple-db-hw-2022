@@ -1,0 +1,103 @@
+Participant SQL_Engine
+Participant InnoDB_TRX
+Participant Undo_Log
+Participant Buffer_Pool
+Participant Change_Buffer
+Participant MTR
+Participant Page_Latch
+Participant Redo_Log
+Participant Disk
+
+
+== 1. SQL 层开始 ==
+SQL_Engine -> InnoDB_TRX: BEGIN / start insert
+InnoDB_TRX -> Undo_Log: allocate undo segment
+
+== 2. 开始 mini-transaction (mtr) ==
+SQL_Engine -> MTR: mtr_start()
+
+== 3. 获取主键页 ==
+MTR -> Buffer_Pool: buf_page_get(root_page)
+Buffer_Pool -> Disk: (if page not in memory) read page
+Buffer_Pool --> MTR: return page object
+
+== 4. 获取 page latch（必定需要） ==
+MTR -> Page_Latch: acquire X-latch (exclusive)
+Page_Latch --> MTR: latch granted
+
+== 5. 获取行锁（逻辑锁，不属于 mtr） ==
+InnoDB_TRX -> Buffer_Pool: record-level lock on PK position
+Buffer_Pool --> InnoDB_TRX: record lock granted
+
+== 6. 写 undo log（逻辑日志）==
+InnoDB_TRX -> Undo_Log: write "insert undo record"
+
+== 7. 修改 page（内存） ==
+MTR -> Buffer_Pool: insert record into page memory
+Buffer_Pool --> MTR: mark page dirty
+
+== 8. 写 redo log（物理/逻辑 mlog） ==
+MTR -> Redo_Log: append mlog_insert_rec + page id + record info
+
+== 9. 释放 page latch ==
+MTR -> Page_Latch: release latch
+
+== 10. 主键插入的 mtr 提交 ==
+MTR -> Redo_Log: merge mtr redo into log buffer
+MTR -> MTR: commit mtr_done()
+
+
+===============================================
+== 11. 开始处理二级索引 ==
+loop each secondary index
+    SQL_Engine -> MTR: mtr_start()
+
+    MTR -> Buffer_Pool: try buf_page_get(leaf_page)
+    Buffer_Pool --> MTR: page or NULL
+
+    alt secondary index page not in buffer pool
+        MTR -> Change_Buffer: insert buffer entry
+        Change_Buffer -> Redo_Log: write mlog for change buffer insert
+        MTR -> MTR: mtr_commit()
+    else page in buffer pool
+        MTR -> Page_Latch: acquire X-latch
+        InnoDB_TRX -> Buffer_Pool: acquire record lock if needed
+        MTR -> Buffer_Pool: insert secondary key
+        MTR -> Redo_Log: write mlog_insert_sec_rec
+        Page_Latch -> MTR: release latch
+        MTR -> MTR: mtr_commit()
+    end
+end
+
+
+===============================================
+== 12. 用户触发 COMMIT ==
+SQL_Engine -> InnoDB_TRX: COMMIT
+
+InnoDB_TRX -> Redo_Log: write "commit record" into log buffer
+
+alt innodb_flush_log_at_trx_commit = 1
+    Redo_Log -> Disk: write redo log file
+    Disk --> Redo_Log: fsync done
+else innodb_flush_log_at_trx_commit = 2
+    Redo_Log -> OS_Cache: write (no fsync)
+else (=0)
+    Background_Log_Flush will sync later
+end
+
+InnoDB_TRX -> InnoDB_TRX: mark trx committed
+InnoDB_TRX -> InnoDB_TRX: release row-level locks
+
+
+===============================================
+== 13. 后台脏页刷盘（异步） ==
+Buffer_Pool -> Disk: write dirty pages
+Disk --> Buffer_Pool: write complete
+
+Background_Flush -> Change_Buffer: merge buffered entries
+Change_Buffer -> Disk: write merged pages
+Disk --> Change_Buffer: ok
+
+
+===============================================
+== INSERT 完成 ==

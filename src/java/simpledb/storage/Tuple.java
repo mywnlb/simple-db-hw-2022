@@ -13,6 +13,10 @@ public class Tuple implements Serializable {
 
     private static final long serialVersionUID = 1L;
 
+    private TupleDesc tupleDesc; // The schema of this tuple
+    private RecordId recordId;
+    private Field[] fields; // Array of fields representing the data in this tuple
+
     /**
      * Create a new tuple with the specified schema (type).
      *
@@ -20,15 +24,17 @@ public class Tuple implements Serializable {
      *           instance with at least one field.
      */
     public Tuple(TupleDesc td) {
-        // TODO: some code goes here
+        if (td == null || td.numFields() == 0) {
+            throw new IllegalArgumentException("TupleDesc must not be null and must have at least one field.");
+        }
+        this.tupleDesc = td;
     }
 
     /**
      * @return The TupleDesc representing the schema of this tuple.
      */
     public TupleDesc getTupleDesc() {
-        // TODO: some code goes here
-        return null;
+        return this.tupleDesc;
     }
 
     /**
@@ -36,8 +42,7 @@ public class Tuple implements Serializable {
      *         be null.
      */
     public RecordId getRecordId() {
-        // TODO: some code goes here
-        return null;
+        return this.recordId;
     }
 
     /**
@@ -46,7 +51,10 @@ public class Tuple implements Serializable {
      * @param rid the new RecordId for this tuple.
      */
     public void setRecordId(RecordId rid) {
-        // TODO: some code goes here
+        if (rid == null) {
+            throw new IllegalArgumentException("RecordId must not be null.");
+        }
+        this.recordId = rid;
     }
 
     /**
@@ -56,7 +64,13 @@ public class Tuple implements Serializable {
      * @param f new value for the field.
      */
     public void setField(int i, Field f) {
-        // TODO: some code goes here
+        if (i < 0 || i >= tupleDesc.numFields()) {
+            throw new IndexOutOfBoundsException("Field index out of bounds: " + i);
+        }
+        if (fields == null) {
+            fields = new Field[tupleDesc.numFields()];
+        }
+        fields[i] = f;
     }
 
     /**
@@ -64,8 +78,13 @@ public class Tuple implements Serializable {
      * @return the value of the ith field, or null if it has not been set.
      */
     public Field getField(int i) {
-        // TODO: some code goes here
-        return null;
+        if (i < 0 || i >= tupleDesc.numFields()) {
+            throw new IndexOutOfBoundsException("Field index out of bounds: " + i);
+        }
+        if (fields == null || fields[i] == null) {
+            return null; // Field has not been set
+        }
+        return fields[i];
     }
 
     /**
@@ -77,22 +96,42 @@ public class Tuple implements Serializable {
      * where \t is any whitespace (except a newline)
      */
     public String toString() {
-        // TODO: some code goes here
-        throw new UnsupportedOperationException("Implement this");
+        if (fields == null || fields.length == 0) {
+            return ""; // No fields set
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < fields.length; i++) {
+            if (i > 0) {
+                sb.append("\t"); // Append tab between fields
+            }
+            Field field = fields[i];
+            if (field != null) {
+                sb.append(field.toString());
+            } else {
+                sb.append("null"); // Handle unset fields
+            }
+        }
+        return sb.toString();
     }
 
     /**
      * @return An iterator which iterates over all the fields of this tuple
      */
     public Iterator<Field> fields() {
-        // TODO: some code goes here
-        return null;
+        if (fields == null) {
+            return Arrays.asList(new Field[tupleDesc.numFields()]).iterator(); // Return empty iterator if no fields set
+        }
+        return Arrays.asList(fields).iterator();
     }
 
     /**
      * reset the TupleDesc of this tuple (only affecting the TupleDesc)
      */
     public void resetTupleDesc(TupleDesc td) {
-        // TODO: some code goes here
+        if (td == null || td.numFields() == 0) {
+            throw new IllegalArgumentException("TupleDesc must not be null and must have at least one field.");
+        }
+        this.tupleDesc = td;
+        this.fields = new Field[td.numFields()]; // Reset fields to match new TupleDesc
     }
 }

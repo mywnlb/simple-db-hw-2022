@@ -22,12 +22,20 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class Catalog {
 
+    private Map<String, DbFile> tables; // Maps table name to DbFile
+    private Map<String, String> primaryKeys; // Maps table ID to primary key field name
+    private Map<Integer, DbFile> files;
+    private Map<Integer, String> tableNames;
+
     /**
      * Constructor.
      * Creates a new, empty catalog.
      */
     public Catalog() {
-        // TODO: some code goes here
+        tables = new ConcurrentHashMap<>();
+        primaryKeys = new ConcurrentHashMap<>();
+        files = new ConcurrentHashMap<>();
+        tableNames = new ConcurrentHashMap<>();
     }
 
     /**
@@ -41,7 +49,16 @@ public class Catalog {
      * @param pkeyField the name of the primary key field
      */
     public void addTable(DbFile file, String name, String pkeyField) {
-        // TODO: some code goes here
+        if (file == null || name == null) {
+            throw new IllegalArgumentException("File and name cannot be null");
+        }
+        if (tables.containsKey(name)) {
+            System.out.println("Warning: Table with name " + name + " already exists. Overwriting.");
+        }
+        tables.put(name, file);
+        primaryKeys.put(name + "", pkeyField); // Use file ID as key
+        files.put(file.getId(), file);
+        tableNames.put(file.getId(), name);
     }
 
     public void addTable(DbFile file, String name) {
@@ -66,8 +83,14 @@ public class Catalog {
      * @throws NoSuchElementException if the table doesn't exist
      */
     public int getTableId(String name) throws NoSuchElementException {
-        // TODO: some code goes here
-        return 0;
+        if (name == null) {
+            throw new NoSuchElementException("Should not find table with null name");
+        }
+        if (tables.containsKey(name)) {
+            return tables.get(name).getId();
+        } else {
+            throw new NoSuchElementException("Table with name " + name + " does not exist.");
+        }
     }
 
     /**
@@ -78,8 +101,12 @@ public class Catalog {
      * @throws NoSuchElementException if the table doesn't exist
      */
     public TupleDesc getTupleDesc(int tableid) throws NoSuchElementException {
-        // TODO: some code goes here
-        return null;
+        DbFile file = getDatabaseFile(tableid);
+        if (file != null) {
+            return file.getTupleDesc();
+        } else {
+            throw new NoSuchElementException("Table with id " + tableid + " does not exist.");
+        }
     }
 
     /**
@@ -90,30 +117,44 @@ public class Catalog {
      *                function passed to addTable
      */
     public DbFile getDatabaseFile(int tableid) throws NoSuchElementException {
-        // TODO: some code goes here
-        return null;
+        DbFile file = files.get(tableid);
+        if (file != null) {
+            return file;
+        } else {
+            throw new NoSuchElementException("Table with id " + tableid + " does not exist.");
+        }
     }
 
     public String getPrimaryKey(int tableid) {
-        // TODO: some code goes here
-        return null;
+        String name = tableNames.get(tableid);
+        if (name != null) {
+            return primaryKeys.get(name);
+        } else {
+            throw new NoSuchElementException("Table with id " + tableid + " does not exist.");
+        }
     }
 
     public Iterator<Integer> tableIdIterator() {
-        // TODO: some code goes here
-        return null;
+        return files.keySet().iterator();
     }
 
     public String getTableName(int id) {
-        // TODO: some code goes here
-        return null;
+        String name = tableNames.get(id);
+        if (name != null) {
+            return name;
+        } else {
+            throw new NoSuchElementException("Table with id " + id + " does not exist.");
+        }
     }
 
     /**
      * Delete all tables from the catalog
      */
     public void clear() {
-        // TODO: some code goes here
+        tables.clear();
+        primaryKeys.clear();
+        files.clear();
+        tableNames.clear();
     }
 
     /**

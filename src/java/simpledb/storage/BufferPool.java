@@ -38,13 +38,29 @@ public class BufferPool {
      */
     public static final int DEFAULT_PAGES = 50;
 
+
+    /** 最大页面数量 */
+    private final int numPages;
+
+    /** 页面缓存：PageId -> Page */
+    private final Map<PageId, Page> pageCache;
+
+    /** LRU顺序记录：使用LinkedList维护访问顺序 */
+    private final LinkedList<PageId> lruList;
+
+    /** 锁管理器 */
+    private final LockManager lockManager;
+
     /**
      * Creates a BufferPool that caches up to numPages pages.
      *
      * @param numPages maximum number of pages in this buffer pool.
      */
     public BufferPool(int numPages) {
-        // TODO: some code goes here
+        this.numPages = numPages;
+        this.pageCache = new ConcurrentHashMap<>();
+        this.lruList = new LinkedList<>();
+        this.lockManager = new LockManager();
     }
 
     public static int getPageSize() {
@@ -78,8 +94,40 @@ public class BufferPool {
      */
     public Page getPage(TransactionId tid, PageId pid, Permissions perm)
             throws TransactionAbortedException, DbException {
-        // TODO: some code goes here
-        return null;
+        // 1. 获取锁（Lab4）
+        LockManager.LockType lockType = (perm == Permissions.READ_ONLY)
+                ? LockManager.LockType.SHARED
+                : LockManager.LockType.EXCLUSIVE;
+
+        boolean acquired = lockManager.acquireLock(tid, pid, lockType, 500); // 500ms超时
+        if (!acquired) {
+            throw new TransactionAbortedException();
+        }
+
+        // 2. 从缓存获取
+        synchronized (this) {
+            if (pageCache.containsKey(pid)) {
+                // 更新LRU顺序
+                lruList.remove(pid);
+                lruList.addLast(pid);
+                return pageCache.get(pid);
+            }
+
+            // 3. 缓存满了需要驱逐
+            if (pageCache.size() >= numPages) {
+                evictPage();
+            }
+
+            // 4. 从磁盘读取
+            DbFile dbFile = Database.getCatalog().getDatabaseFile(pid.getTableId());
+            Page page = dbFile.readPage(pid);
+
+            // 5. 加入缓存
+            pageCache.put(pid, page);
+            lruList.addLast(pid);
+
+            return page;
+        }
     }
 
     /**
@@ -93,7 +141,7 @@ public class BufferPool {
      */
     public void unsafeReleasePage(TransactionId tid, PageId pid) {
         // TODO: some code goes here
-        // not necessary for lab1|lab2
+        lockManager.releaseLock(tid, pid);
     }
 
     /**
@@ -103,16 +151,14 @@ public class BufferPool {
      */
     public void transactionComplete(TransactionId tid) {
         // TODO: some code goes here
-        // not necessary for lab1|lab2
+        transactionComplete(tid, true);
     }
 
     /**
      * Return true if the specified transaction has a lock on the specified page
      */
     public boolean holdsLock(TransactionId tid, PageId p) {
-        // TODO: some code goes here
-        // not necessary for lab1|lab2
-        return false;
+        return lockManager.holdsLock(tid, p);
     }
 
     /**
@@ -123,8 +169,33 @@ public class BufferPool {
      * @param commit a flag indicating whether we should commit or abort
      */
     public void transactionComplete(TransactionId tid, boolean commit) {
-        // TODO: some code goes here
-        // not necessary for lab1|lab2
+        // 获取该事务持有锁的所有页面
+        Set<PageId> lockedPages = lockManager.getLockedPages(tid);
+
+        if (commit) {
+            // FORCE策略：提交时刷所有脏页到磁盘
+            try {
+                flushPages(tid);
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        } else {
+            // NO-STEAL策略：回滚时丢弃内存中的修改
+            synchronized (this) {
+                for (PageId pid : lockedPages) {
+                    Page page = pageCache.get(pid);
+                    if (page != null && page.isDirty() != null) {
+                        // 从磁盘重新读取干净的页面
+                        DbFile dbFile = Database.getCatalog().getDatabaseFile(pid.getTableId());
+                        Page cleanPage = dbFile.readPage(pid);
+                        pageCache.put(pid, cleanPage);
+                    }
+                }
+            }
+        }
+
+        // 释放所有锁
+        lockManager.releaseAllLocks(tid);
     }
 
     /**
@@ -144,8 +215,22 @@ public class BufferPool {
      */
     public void insertTuple(TransactionId tid, int tableId, Tuple t)
             throws DbException, IOException, TransactionAbortedException {
-        // TODO: some code goes here
-        // not necessary for lab1
+        DbFile dbFile = Database.getCatalog().getDatabaseFile(tableId);
+        List<Page> dirtyPages = dbFile.insertTuple(tid, t);
+
+        synchronized (this) {
+            for (Page page : dirtyPages) {
+                page.markDirty(true, tid);
+
+                PageId pid = page.getId();
+                // 更新缓存
+                if (pageCache.containsKey(pid)) {
+                    lruList.remove(pid);
+                }
+                pageCache.put(pid, page);
+                lruList.addLast(pid);
+            }
+        }
     }
 
     /**
@@ -163,8 +248,23 @@ public class BufferPool {
      */
     public void deleteTuple(TransactionId tid, Tuple t)
             throws DbException, IOException, TransactionAbortedException {
-        // TODO: some code goes here
-        // not necessary for lab1
+        int tableId = t.getRecordId().getPageId().getTableId();
+        DbFile dbFile = Database.getCatalog().getDatabaseFile(tableId);
+        List<Page> dirtyPages = dbFile.deleteTuple(tid, t);
+
+        synchronized (this) {
+            for (Page page : dirtyPages) {
+                page.markDirty(true, tid);
+
+                PageId pid = page.getId();
+                // 更新缓存
+                if (pageCache.containsKey(pid)) {
+                    lruList.remove(pid);
+                }
+                pageCache.put(pid, page);
+                lruList.addLast(pid);
+            }
+        }
     }
 
     /**
@@ -173,8 +273,9 @@ public class BufferPool {
      * break simpledb if running in NO STEAL mode.
      */
     public synchronized void flushAllPages() throws IOException {
-        // TODO: some code goes here
-        // not necessary for lab1
+        for (PageId pid : pageCache.keySet()) {
+            flushPage(pid);
+        }
 
     }
 
@@ -188,8 +289,8 @@ public class BufferPool {
      * are removed from the cache so they can be reused safely
      */
     public synchronized void removePage(PageId pid) {
-        // TODO: some code goes here
-        // not necessary for lab1
+        pageCache.remove(pid);
+        lruList.remove(pid);
     }
 
     /**
@@ -198,16 +299,32 @@ public class BufferPool {
      * @param pid an ID indicating the page to flush
      */
     private synchronized void flushPage(PageId pid) throws IOException {
-        // TODO: some code goes here
-        // not necessary for lab1
+        Page page = pageCache.get(pid);
+        if (page == null) {
+            return;
+        }
+
+        // 只刷脏页
+        TransactionId dirtyTid = page.isDirty();
+        if (dirtyTid != null) {
+            // 写入磁盘
+            DbFile dbFile = Database.getCatalog().getDatabaseFile(pid.getTableId());
+            dbFile.writePage(page);
+            // 标记为干净
+            page.markDirty(false, null);
+        }
     }
 
     /**
      * Write all pages of the specified transaction to disk.
      */
     public synchronized void flushPages(TransactionId tid) throws IOException {
-        // TODO: some code goes here
-        // not necessary for lab1|lab2
+        for (PageId pid : pageCache.keySet()) {
+            Page page = pageCache.get(pid);
+            if (page != null && tid.equals(page.isDirty())) {
+                flushPage(pid);
+            }
+        }
     }
 
     /**
@@ -215,8 +332,25 @@ public class BufferPool {
      * Flushes the page to disk to ensure dirty pages are updated on disk.
      */
     private synchronized void evictPage() throws DbException {
-        // TODO: some code goes here
-        // not necessary for lab1
+        // 从LRU列表头部开始找（最久未使用的）
+        PageId evictPid = null;
+
+        for (PageId pid : lruList) {
+            Page page = pageCache.get(pid);
+            // NO-STEAL: 不能驱逐脏页
+            if (page != null && page.isDirty() == null) {
+                evictPid = pid;
+                break;
+            }
+        }
+
+        if (evictPid == null) {
+            throw new DbException("All pages in buffer pool are dirty, cannot evict");
+        }
+
+        // 驱逐页面（已经是干净的，不需要刷盘）
+        pageCache.remove(evictPid);
+        lruList.remove(evictPid);
     }
 
 }

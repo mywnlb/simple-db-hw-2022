@@ -8,10 +8,39 @@ import java.io.Serializable;
 /**
  * JoinPredicate compares fields of two tuples using a predicate. JoinPredicate
  * is most likely used by the Join operator.
+ *
+ * 用于 Join 操作中比较两个 tuple 的字段：
+ *
+ * 示例：
+ * SELECT * FROM students s, enrollments e WHERE s.id = e.student_id
+ *
+ * JoinPredicate: field1=0 (s.id), op=EQUALS, field2=0 (e.student_id)
+ *
+ * ┌─────────────────┐     ┌──────────────────────┐
+ * │ students (t1)   │     │ enrollments (t2)     │
+ * ├─────────────────┤     ├──────────────────────┤
+ * │ id=1, name=Alice│     │ student_id=1, course │
+ * └────────┬────────┘     └──────────┬───────────┘
+ *          │                         │
+ *          └────────┬────────────────┘
+ *                   ▼
+ *          t1.getField(0).compare(EQUALS, t2.getField(0))
+ *                   │
+ *                   ▼
+ *               true/false
  */
 public class JoinPredicate implements Serializable {
 
     private static final long serialVersionUID = 1L;
+
+    /** 第一个 tuple 中的字段索引 */
+    private final int field1;
+
+    /** 第二个 tuple 中的字段索引 */
+    private final int field2;
+
+    /** 比较操作符 */
+    private final Predicate.Op op;
 
     /**
      * Constructor -- create a new predicate over two fields of two tuples.
@@ -25,7 +54,9 @@ public class JoinPredicate implements Serializable {
      * @see Predicate
      */
     public JoinPredicate(int field1, Predicate.Op op, int field2) {
-        // TODO: some code goes here
+        this.field1 = field1;
+        this.op = op;
+        this.field2 = field2;
     }
 
     /**
@@ -35,22 +66,20 @@ public class JoinPredicate implements Serializable {
      * @return true if the tuples satisfy the predicate.
      */
     public boolean filter(Tuple t1, Tuple t2) {
-        // TODO: some code goes here
-        return false;
+        Field f1 = t1.getField(field1);
+        Field f2 = t2.getField(field2);
+        return f1.compare(op, f2);
     }
 
     public int getField1() {
-        // TODO: some code goes here
-        return -1;
+        return field1;
     }
 
     public int getField2() {
-        // TODO: some code goes here
-        return -1;
+        return field2;
     }
 
     public Predicate.Op getOperator() {
-        // TODO: some code goes here
-        return null;
+        return op;
     }
 }

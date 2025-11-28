@@ -13,10 +13,193 @@ import java.util.NoSuchElementException;
  * The Aggregation operator that computes an aggregate (e.g., sum, avg, max,
  * min). Note that we only support aggregates over a single column, grouped by a
  * single column.
+ *
+ * 对应 SQL 中的聚合操作：
+ * SELECT department, AVG(salary) FROM employees GROUP BY department
+ *
+ * 执行计划：
+ * ┌─────────────────────┐
+ * │     Aggregate       │  ← 聚合操作
+ * │ (gfield=0, afield=1)│
+ * │ (op=AVG)            │
+ * └──────────┬──────────┘
+ *            │
+ * ┌──────────▼──────────┐
+ * │      SeqScan        │
+ * │    (employees)      │
+ * └─────────────────────┘
+ *┌─────────────────────────────────────────────────────────────┐
+ * │                      Aggregate                              │
+ * │  ┌───────────────────────────────────────────────────────┐ │
+ * │  │  1. 根据字段类型选择 Aggregator                        │ │
+ * │  │     INT_TYPE  → IntegerAggregator                     │ │
+ * │  │     STRING_TYPE → StringAggregator                    │ │
+ * │  │                                                       │ │
+ * │  │  2. open() 时遍历子操作符，合并到 Aggregator          │ │
+ * │  │                                                       │ │
+ * │  │  3. fetchNext() 从 Aggregator.iterator() 返回结果    │ │
+ * │  └───────────────────────────────────────────────────────┘ │
+ * └─────────────────────────────────────────────────────────────┘
+ *
+ * ┌────────────────────────────────────────────────────────────────┐
+ * │  SELECT dept, AVG(salary) FROM emp GROUP BY dept               │
+ * └────────────────────────────────────────────────────────────────┘
+ *                               │
+ *                               ▼
+ * ┌────────────────────────────────────────────────────────────────┐
+ * │                     Aggregate.open()                           │
+ * │  ┌──────────────────────────────────────────────────────────┐ │
+ * │  │  child.open()                                             │ │
+ * │  │                                                           │ │
+ * │  │  while (child.hasNext())                                  │ │
+ * │  │      aggregator.mergeTupleIntoGroup(child.next())         │ │
+ * │  │                                                           │ │
+ * │  │  aggregateIterator = aggregator.iterator()                │ │
+ * │  │  aggregateIterator.open()                                 │ │
+ * │  └──────────────────────────────────────────────────────────┘ │
+ * └────────────────────────────────────────────────────────────────┘
+ *                               │
+ *                               ▼
+ * ┌────────────────────────────────────────────────────────────────┐
+ * │                   Aggregate.fetchNext()                        │
+ * │  ┌──────────────────────────────────────────────────────────┐ │
+ * │  │  return aggregateIterator.next()                          │ │
+ * │  └──────────────────────────────────────────────────────────┘ │
+ * └────────────────────────────────────────────────────────────────┘
+ *
+ * 有分组时：
+ * ┌──────────────────────┬─────────────────────────┐
+ * │ groupFieldName       │ OP(aggFieldName)        │
+ * │ (原类型)             │ (INT_TYPE)              │
+ * └──────────────────────┴─────────────────────────┘
+ * 例如：department, AVG(salary)
+ *
+ * 无分组时：
+ * ┌─────────────────────────┐
+ * │ OP(aggFieldName)        │
+ * │ (INT_TYPE)              │
+ * └─────────────────────────┘
+ * 例如：COUNT(name)
+ * 工作流程：
+ * 1. open() 时，遍历所有子 tuple，合并到 Aggregator 中
+ * 2. fetchNext() 时，从 Aggregator 的 iterator 返回结果
+ *
+ *
+ * ┌─────────────────────────────────────────────────────────────────────┐
+ * │                        职责分离                                      │
+ * ├─────────────────────────────────┬───────────────────────────────────┤
+ * │   IntegerAggregator             │          Aggregate                │
+ * │   StringAggregator              │                                   │
+ * ├─────────────────────────────────┼───────────────────────────────────┤
+ * │   "如何计算"                     │   "如何获取数据 + 何时计算"       │
+ * │                                 │                                   │
+ * │   • 纯粹的聚合算法               │   • 是一个 Operator              │
+ * │   • 不知道数据从哪来             │   • 可以放入执行计划树            │
+ * │   • 只管 merge 和计算            │   • 实现 OpIterator 接口         │
+ * │   • 不是 Operator               │   • 协调数据流                    │
+ * └─────────────────────────────────┴───────────────────────────────────┘
+ *
+ * SELECT department, AVG(salary)
+ * FROM employees
+ * WHERE age > 30
+ * GROUP BY department
+ * ```
+ * ```
+ * 执行计划树（只有 Operator 才能组成）：
+ *
+ *         ┌─────────────┐
+ *         │  Aggregate  │  ← Operator，可以连接其他节点
+ *         └──────┬──────┘
+ *                │
+ *         ┌──────▼──────┐
+ *         │   Filter    │  ← Operator
+ *         └──────┬──────┘
+ *                │
+ *         ┌──────▼──────┐
+ *         │   SeqScan   │  ← Operator
+ *         └─────────────┘
+ *
+ * IntegerAggregator 不是 Operator，无法放入这个树！
+ * 它只是 Aggregate 内部使用的"计算引擎"。
+ * ```
+ *
+ * ## 策略模式
+ * ```
+ * ┌─────────────────────────────────────────────────────────────────┐
+ * │                     Strategy Pattern                            │
+ * │                                                                 │
+ * │   ┌─────────────────┐                                          │
+ * │   │    Aggregate    │  ← Context (上下文)                       │
+ * │   │   (Operator)    │                                          │
+ * │   └────────┬────────┘                                          │
+ * │            │ uses                                               │
+ * │            ▼                                                    │
+ * │   ┌─────────────────┐                                          │
+ * │   │   Aggregator    │  ← Strategy Interface (策略接口)         │
+ * │   │   (interface)   │                                          │
+ * │   └────────┬────────┘                                          │
+ * │            │                                                    │
+ * │      ┌─────┴─────┐                                             │
+ * │      ▼           ▼                                             │
+ * │ ┌─────────┐ ┌─────────┐                                        │
+ * │ │ Integer │ │ String  │  ← Concrete Strategies (具体策略)      │
+ * │ │Aggregator│ │Aggregator│                                       │
+ * │ └─────────┘ └─────────┘                                        │
+ * └─────────────────────────────────────────────────────────────────┘
+ *
+ * // ❌ 没有 Aggregate，代码会很丑陋
+ * SeqScan scan = new SeqScan(tid, tableId);
+ * Filter filter = new Filter(predicate, scan);
+ *
+ * // 必须手动遍历，无法融入执行计划
+ * IntegerAggregator agg = new IntegerAggregator(0, Type.INT_TYPE, 1, Op.AVG);
+ * filter.open();
+ * while (filter.hasNext()) {
+ *     agg.mergeTupleIntoGroup(filter.next());
+ * }
+ * OpIterator result = agg.iterator();
+ *
+ * // ❌ 如果还要再套一层 Join 或 Project？代码更复杂...
+ *
+ *
+ *
+ * // ✅ 有了 Aggregate，可以无缝组合
+ * SeqScan scan = new SeqScan(tid, tableId);
+ * Filter filter = new Filter(predicate, scan);
+ * Aggregate agg = new Aggregate(filter, 1, 0, Op.AVG);  // 是一个 Operator！
+ * Join join = new Join(joinPred, agg, anotherScan);     // 可以继续组合！
+ *
+ * // 统一的迭代接口
+ * join.open();
+ * while (join.hasNext()) {
+ *     Tuple t = join.next();
+ * }
+ *
  */
 public class Aggregate extends Operator {
 
     private static final long serialVersionUID = 1L;
+
+    /** 子操作符（数据来源） */
+    private OpIterator child;
+
+    /** 聚合字段索引 */
+    private final int aggFieldIndex;
+
+    /** 分组字段索引，-1 表示无分组 */
+    private final int groupFieldIndex;
+
+    /** 聚合操作类型 */
+    private final Aggregator.Op aggOp;
+
+    /** 聚合器（IntegerAggregator 或 StringAggregator） */
+    private Aggregator aggregator;
+
+    /** 聚合结果迭代器 */
+    private OpIterator aggregateIterator;
+
+    /** 子操作符的 TupleDesc */
+    private TupleDesc childTd;
 
     /**
      * Constructor.
@@ -32,7 +215,22 @@ public class Aggregate extends Operator {
      * @param aop    The aggregation operator to use
      */
     public Aggregate(OpIterator child, int afield, int gfield, Aggregator.Op aop) {
-        // TODO: some code goes here
+        this.child = child;
+        this.aggFieldIndex = afield;
+        this.groupFieldIndex = gfield;
+        this.aggOp = aop;
+        this.childTd = child.getTupleDesc();
+
+        // 根据聚合字段类型选择合适的 Aggregator
+        Type aggFieldType = childTd.getFieldType(afield);
+        Type groupFieldType = (gfield == Aggregator.NO_GROUPING) ? null : childTd.getFieldType(gfield);
+
+        if (aggFieldType == Type.INT_TYPE) {
+            this.aggregator = new IntegerAggregator(gfield, groupFieldType, afield, aop);
+        } else {
+            // StringField 只支持 COUNT
+            this.aggregator = new StringAggregator(gfield, groupFieldType, afield, aop);
+        }
     }
 
     /**
@@ -41,8 +239,7 @@ public class Aggregate extends Operator {
      *         {@link Aggregator#NO_GROUPING}
      */
     public int groupField() {
-        // TODO: some code goes here
-        return -1;
+        return groupFieldIndex;
     }
 
     /**
@@ -51,16 +248,17 @@ public class Aggregate extends Operator {
      *         null;
      */
     public String groupFieldName() {
-        // TODO: some code goes here
-        return null;
+        if (groupFieldIndex == Aggregator.NO_GROUPING) {
+            return null;
+        }
+        return childTd.getFieldName(groupFieldIndex);
     }
 
     /**
      * @return the aggregate field
      */
     public int aggregateField() {
-        // TODO: some code goes here
-        return -1;
+        return aggFieldIndex;
     }
 
     /**
@@ -68,16 +266,14 @@ public class Aggregate extends Operator {
      *         tuples
      */
     public String aggregateFieldName() {
-        // TODO: some code goes here
-        return null;
+        return childTd.getFieldName(aggFieldIndex);
     }
 
     /**
      * @return return the aggregate operator
      */
     public Aggregator.Op aggregateOp() {
-        // TODO: some code goes here
-        return null;
+        return aggOp;
     }
 
     public static String nameOfAggregatorOp(Aggregator.Op aop) {
@@ -86,7 +282,20 @@ public class Aggregate extends Operator {
 
     public void open() throws NoSuchElementException, DbException,
             TransactionAbortedException {
-        // TODO: some code goes here
+        super.open();
+
+        // 打开子操作符
+        child.open();
+
+        // 遍历所有子 tuple，合并到 aggregator 中
+        while (child.hasNext()) {
+            Tuple tuple = child.next();
+            aggregator.mergeTupleIntoGroup(tuple);
+        }
+
+        // 获取聚合结果迭代器
+        aggregateIterator = aggregator.iterator();
+        aggregateIterator.open();
     }
 
     /**
@@ -97,12 +306,17 @@ public class Aggregate extends Operator {
      * aggregate. Should return null if there are no more tuples.
      */
     protected Tuple fetchNext() throws TransactionAbortedException, DbException {
-        // TODO: some code goes here
+        if (aggregateIterator != null && aggregateIterator.hasNext()) {
+            return aggregateIterator.next();
+        }
         return null;
     }
 
     public void rewind() throws DbException, TransactionAbortedException {
-        // TODO: some code goes here
+        // 重置聚合结果迭代器
+        if (aggregateIterator != null) {
+            aggregateIterator.rewind();
+        }
     }
 
     /**
@@ -117,23 +331,45 @@ public class Aggregate extends Operator {
      * iterator.
      */
     public TupleDesc getTupleDesc() {
-        // TODO: some code goes here
-        return null;
+        String aggName = aggOp.toString() + "(" + childTd.getFieldName(aggFieldIndex) + ")";
+
+        if (groupFieldIndex == Aggregator.NO_GROUPING) {
+            // 无分组：只有聚合值
+            return new TupleDesc(
+                    new Type[] { Type.INT_TYPE },
+                    new String[] { aggName }
+            );
+        } else {
+            // 有分组：(groupVal, aggregateVal)
+            Type groupFieldType = childTd.getFieldType(groupFieldIndex);
+            String groupName = childTd.getFieldName(groupFieldIndex);
+
+            return new TupleDesc(
+                    new Type[] { groupFieldType, Type.INT_TYPE },
+                    new String[] { groupName, aggName }
+            );
+        }
     }
 
     public void close() {
-        // TODO: some code goes here
+        super.close();
+        child.close();
+        if (aggregateIterator != null) {
+            aggregateIterator.close();
+            aggregateIterator = null;
+        }
     }
 
     @Override
     public OpIterator[] getChildren() {
-        // TODO: some code goes here
-        return null;
+        return new OpIterator[] { child };
     }
 
     @Override
     public void setChildren(OpIterator[] children) {
-        // TODO: some code goes here
+        if (children != null && children.length > 0) {
+            this.child = children[0];
+            this.childTd = child.getTupleDesc();
+        }
     }
-
 }

@@ -7,6 +7,25 @@ import java.io.Serializable;
 
 /**
  * Predicate compares tuples to a specified Field value.
+ *
+ * 用于 Filter 操作中比较 tuple 的字段与常量值：
+ *
+ * 示例：
+ * SELECT * FROM students WHERE age > 20
+ *
+ * Predicate: field=1 (age), op=GREATER_THAN, operand=IntField(20)
+ *
+ * ┌─────────────────────────┐
+ * │ students tuple          │
+ * ├─────────────────────────┤
+ * │ name=Alice, age=25      │
+ * └────────────┬────────────┘
+ *              │
+ *              ▼
+ *    tuple.getField(1).compare(GREATER_THAN, IntField(20))
+ *              │
+ *              ▼
+ *          25 > 20 → true
  */
 public class Predicate implements Serializable {
 
@@ -45,8 +64,16 @@ public class Predicate implements Serializable {
                 return "<>";
             throw new IllegalStateException("impossible to reach here");
         }
-
     }
+
+    /** 要比较的字段索引 */
+    private final int fieldIndex;
+
+    /** 比较操作符 */
+    private final Op op;
+
+    /** 比较的常量值 */
+    private final Field operand;
 
     /**
      * Constructor.
@@ -56,31 +83,30 @@ public class Predicate implements Serializable {
      * @param operand field value to compare passed in tuples to
      */
     public Predicate(int field, Op op, Field operand) {
-        // TODO: some code goes here
+        this.fieldIndex = field;
+        this.op = op;
+        this.operand = operand;
     }
 
     /**
      * @return the field number
      */
     public int getField() {
-        // TODO: some code goes here
-        return -1;
+        return fieldIndex;
     }
 
     /**
      * @return the operator
      */
     public Op getOp() {
-        // TODO: some code goes here
-        return null;
+        return op;
     }
 
     /**
      * @return the operand
      */
     public Field getOperand() {
-        // TODO: some code goes here
-        return null;
+        return operand;
     }
 
     /**
@@ -93,8 +119,8 @@ public class Predicate implements Serializable {
      * @return true if the comparison is true, false otherwise.
      */
     public boolean filter(Tuple t) {
-        // TODO: some code goes here
-        return false;
+        Field tupleField = t.getField(fieldIndex);
+        return tupleField.compare(op, operand);
     }
 
     /**
@@ -102,7 +128,6 @@ public class Predicate implements Serializable {
      * operand_string"
      */
     public String toString() {
-        // TODO: some code goes here
-        return "";
+        return String.format("f = %d op = %s operand = %s", fieldIndex, op.toString(), operand.toString());
     }
 }

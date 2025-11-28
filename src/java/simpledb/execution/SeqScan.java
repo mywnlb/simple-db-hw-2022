@@ -3,6 +3,7 @@ package simpledb.execution;
 import simpledb.common.Database;
 import simpledb.common.DbException;
 import simpledb.common.Type;
+import simpledb.storage.DbFile;
 import simpledb.storage.DbFileIterator;
 import simpledb.storage.Tuple;
 import simpledb.storage.TupleDesc;
@@ -15,11 +16,38 @@ import java.util.NoSuchElementException;
  * SeqScan is an implementation of a sequential scan access method that reads
  * each tuple of a table in no particular order (e.g., as they are laid out on
  * disk).
+ *  * 执行计划示例：
+ *  * ┌─────────────────────────────────────┐
+ *  * │            Query Plan               │
+ *  * │                                     │
+ *  * │         ┌───────────┐               │
+ *  * │         │  Project  │               │
+ *  * │         └─────┬─────┘               │
+ *  * │               │                     │
+ *  * │         ┌─────▼─────┐               │
+ *  * │         │  Filter   │               │
+ *  * │         └─────┬─────┘               │
+ *  * │               │                     │
+ *  * │         ┌─────▼─────┐               │
+ *  * │         │  SeqScan  │  ← 最底层     │
+ *  * │         │ (table t) │               │
+ *  * │         └───────────┘               │
+ *  * └─────────────────────────────────────┘
  */
 public class SeqScan implements OpIterator {
 
     private static final long serialVersionUID = 1L;
+    /** 事务ID */
+    private final TransactionId tid;
 
+    /** 表ID */
+    private int tableId;
+
+    /** 表别名 */
+    private String tableAlias;
+
+    /** 底层文件迭代器 */
+    private DbFileIterator dbFileIterator;
     /**
      * Creates a sequential scan over the specified table as a part of the
      * specified transaction.
@@ -34,7 +62,9 @@ public class SeqScan implements OpIterator {
      *                   tableAlias.null, or null.null).
      */
     public SeqScan(TransactionId tid, int tableid, String tableAlias) {
-        // TODO: some code goes here
+        this.tid = tid;
+        this.tableId = tableid;
+        this.tableAlias = tableAlias;
     }
 
     /**
@@ -42,15 +72,15 @@ public class SeqScan implements OpIterator {
      *         be the actual name of the table in the catalog of the database
      */
     public String getTableName() {
-        return null;
+        return Database.getCatalog().getTableName(tableId);
     }
 
     /**
      * @return Return the alias of the table this operator scans.
      */
     public String getAlias() {
-        // TODO: some code goes here
-        return null;
+        return tableAlias;
+
     }
 
     /**
@@ -65,7 +95,8 @@ public class SeqScan implements OpIterator {
      *                   tableAlias.null, or null.null).
      */
     public void reset(int tableid, String tableAlias) {
-        // TODO: some code goes here
+        this.tableId = tableid;
+        this.tableAlias = tableAlias;
     }
 
     public SeqScan(TransactionId tid, int tableId) {
@@ -73,7 +104,9 @@ public class SeqScan implements OpIterator {
     }
 
     public void open() throws DbException, TransactionAbortedException {
-        // TODO: some code goes here
+        DbFile dbFile = Database.getCatalog().getDatabaseFile(tableId);
+        dbFileIterator = dbFile.iterator(tid);
+        dbFileIterator.open();
     }
 
     /**
@@ -87,27 +120,59 @@ public class SeqScan implements OpIterator {
      *         prefixed with the tableAlias string from the constructor.
      */
     public TupleDesc getTupleDesc() {
-        // TODO: some code goes here
-        return null;
+        TupleDesc originalTd = Database.getCatalog().getTupleDesc(tableId);
+        int numFields = originalTd.numFields();
+
+        Type[] types = new Type[numFields];
+        String[] fieldNames = new String[numFields];
+
+        for (int i = 0; i < numFields; i++) {
+            types[i] = originalTd.getFieldType(i);
+            // 格式: tableAlias.fieldName
+            String originalName = originalTd.getFieldName(i);
+            fieldNames[i] = tableAlias + "." + originalName;
+        }
+
+        return new TupleDesc(types, fieldNames);
     }
 
     public boolean hasNext() throws TransactionAbortedException, DbException {
-        // TODO: some code goes here
-        return false;
+        if (dbFileIterator == null) {
+            return false;
+        }
+        return dbFileIterator.hasNext();
     }
 
     public Tuple next() throws NoSuchElementException,
             TransactionAbortedException, DbException {
-        // TODO: some code goes here
-        return null;
+        if (dbFileIterator == null) {
+            throw new NoSuchElementException("Iterator not open");
+        }
+
+        Tuple tuple = dbFileIterator.next();
+        if (tuple == null) {
+            throw new NoSuchElementException("No more tuples");
+        }
+        return tuple;
     }
 
     public void close() {
-        // TODO: some code goes here
+        if (dbFileIterator != null) {
+            dbFileIterator.close();
+            dbFileIterator = null;
+        }
     }
 
+    /**
+     * 重置迭代器到开头
+     * @throws DbException
+     * @throws NoSuchElementException
+     * @throws TransactionAbortedException
+     */
     public void rewind() throws DbException, NoSuchElementException,
             TransactionAbortedException {
-        // TODO: some code goes here
+        if (dbFileIterator != null) {
+            dbFileIterator.rewind();
+        }
     }
 }
